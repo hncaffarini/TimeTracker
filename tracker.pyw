@@ -2,12 +2,17 @@ import time
 import platform
 import subprocess
 import sqlite3
+import threading
 import ctypes
 from datetime import datetime
+import pystray
+from pystray import MenuItem as item
+from PIL import Image, ImageDraw
 
 # --- Configuración ---
 CURRENT_OS             = platform.system()
 DB_NAME                = "time_tracker.db"
+RUNNING                = True
 INTERVALO              = 5   # Cada cuántos segundos se lee la actividad
 TIEMPO_MAX_INACTIVIDAD = 120 # Cantidad de segundos para que deje de contar actividad
 
@@ -91,8 +96,27 @@ def clasificar_ventana(titulo_ventana):
 def actualizar_tiempo(ventana_cruda):
     now = datetime.now()
     fecha_hoy = now.strftime('%Y-%m-%d')
-    actividad = clasificar_ventana(ventana_cruda)
     
+    actividad = ventana_cruda
+    titulo_lower = ventana_cruda.lower()
+    
+    match_encontrado = False
+    for sitio in WEBSITES_LIST:
+        if sitio in titulo_lower:
+            actividad = sitio.capitalize()
+            match_encontrado = True
+            break
+            
+    if not match_encontrado:
+        for nav in NAVEGADORES:
+            if nav in titulo_lower:
+                actividad = "Navegación - Otros"
+                match_encontrado = True
+                break
+    
+    if not match_encontrado and " - " in ventana_cruda:
+        actividad = ventana_cruda.split(" - ")[-1].strip()
+
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
@@ -103,9 +127,8 @@ def actualizar_tiempo(ventana_cruda):
                 DO UPDATE SET segundos = segundos + ?
             ''', (fecha_hoy, actividad, INTERVALO, INTERVALO))
             conn.commit()
-            print(f"[{fecha_hoy}] +{INTERVALO}s: {actividad}")
-    except Exception as e:
-        print(f"Error DB: {e}")
+    except Exception:
+        pass
 
 def get_active_window():
     try:
@@ -125,23 +148,51 @@ def get_active_window():
         return "Sistema"
     return "Desconocido"
 
-if __name__ == "__main__":
-    inicializar_db()
-    print(f"--- Tracker en {CURRENT_OS} ---")
-    print(f"Umbral de inactividad: {TIEMPO_MAX_INACTIVIDAD} segundos")
+def crear_icono():
+    width = 64
+    height = 64
+    color_1 = (0, 0, 0)
+    color_2 = (0, 120, 215)
     
-    try:
-        while True:
-            tiempo_sin_uso = get_idle_time()
-            
-            if tiempo_sin_uso < TIEMPO_MAX_INACTIVIDAD:
-                ventana = get_active_window()
-                actualizar_tiempo(ventana)
-            else:
-                # Imprimimo en consola solo para notificar que el script sigue vivo
-                print(f"(Usuario ausente por {int(tiempo_sin_uso)}s - No registrando)", end='\r')
-                
-            time.sleep(INTERVALO)
-            
-    except KeyboardInterrupt:
-        print("\nTracker detenido.")
+    image = Image.new('RGB', (width, height), color_1)
+    dc = ImageDraw.Draw(image)
+    dc.rectangle((width // 2, 0, width, height // 2), fill=color_2)
+    dc.rectangle((0, height // 2, width // 2, height), fill=color_2)
+    
+    return image
+
+def accion_salir(icon, item):
+    global corriendo
+    corriendo = False
+    icon.stop()
+
+def bucle_tracker():
+    """Esta función corre en otro hilo separado"""
+    inicializar_db()
+    
+    while corriendo:
+        tiempo_sin_uso = get_idle_time()
+        
+        if tiempo_sin_uso < TIEMPO_MAX_INACTIVIDAD:
+            ventana = get_active_window()
+            actualizar_tiempo(ventana)
+
+        for _ in range(INTERVALO):
+            if not corriendo: break
+            time.sleep(1)
+
+if __name__ == "__main__":
+    # 1. Iniciamos el tracker en un hilo separado (Background)
+    hilo_tracker = threading.Thread(target=bucle_tracker)
+    hilo_tracker.daemon = True # Si el programa principal muere, este hilo también
+    hilo_tracker.start()
+    
+    # 2. Iniciamos el icono del sistema (Bloquea el hilo principal)
+    image = crear_icono()
+    menu = pystray.Menu(
+        item('Tracker de Tiempo (Activo)', lambda icon, item: None, enabled=False),
+        item('Salir', accion_salir)
+    )
+    
+    icon = pystray.Icon("TrackerApp", image, "Tracker de Tiempo", menu)
+    icon.run()
